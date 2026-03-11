@@ -1,0 +1,25 @@
+# Virtual Environments
+.venv/
+venv311/
+env/
+venv/
+ENV/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Config and Secrets
+config/gemini_key.txt
+config/*.json
+.env
+
+# Data and Caches
+data/ocr_cache/
+*.log
+
+# IDEs
+.vscode/
+.idea/
+*.swp
