@@ -1492,13 +1492,27 @@ def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug
                 like_pat = None
         # 진행현황 표시용
         
-        # 미국 주식용 환율 조회
-        usdkrw_rate = 1450.0
+        # 미국 주식용 환율 조회 (과거 날짜 대응 강화, T+1 적용)
+        usdkrw_rate = 1450.0  # 기본값
         try:
-            df_usd = fdr.DataReader("USD/KRW", start=target_date) if target_date else fdr.DataReader("USD/KRW")
+            # [FIX] 미국 시장은 한국 시간으로 다음 날 오전에 마감되므로, 환율 기준일을 1일 뒤로 설정
+            fx_date_obj = datetime.strptime(target_date, "%Y-%m-%d" if "-" in target_date else "%Y%m%d") + timedelta(days=1)
+            fx_target_date = fx_date_obj.strftime("%Y-%m-%d")
+            
+            # 해당일 환율 조회
+            df_usd = fdr.DataReader("USD/KRW", start=fx_target_date, end=fx_target_date)
+            
+            # 해당일 데이터가 없으면(주말 등) 해당일 기준 7일 전부터의 데이터를 가져와서 마지막 영업일 환율 사용
+            if (df_usd is None or df_usd.empty):
+                try:
+                    start_search = (fx_date_obj - timedelta(days=7)).strftime("%Y-%m-%d")
+                    df_usd = fdr.DataReader("USD/KRW", start=start_search, end=fx_target_date)
+                except Exception:
+                    pass
+
             if df_usd is not None and not df_usd.empty:
                 usdkrw_rate = float(df_usd['Close'].iloc[-1])
-                print(f"\n💵 적용 환율(USD/KRW): {usdkrw_rate:,.2f}원")
+                print(f"\n💵 적용 환율(USD/KRW): {usdkrw_rate:,.2f}원 (기준일: {fx_target_date})")
         except Exception as e:
             print(f"\n경고: 환율 조회 실패 ({e}). 기본값 {usdkrw_rate}원 적용.")
 
@@ -1996,15 +2010,24 @@ def run_daily_update(args):
         # 전일 데이터가 없을 때는 빈 DataFrame으로 초기화
         holdings = pd.DataFrame(columns=["code", "name", "qty", "avg", "current", "eval", "pl", "rate", "weight"]);
     
-    # 2. 매매 기록 로드 전 환율 먼저 조회 (USD 환산용)
+    # 2. 매매 기록 로드 전 환율 먼저 조회 (USD 환산용, T+1 적용)
     usdkrw_rate = 1450.0;
     try:
         import FinanceDataReader as fdr;
-        target_date_fdr_init = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:8]}";
-        df_usd = fdr.DataReader("USD/KRW", start=target_date_fdr_init) if target_date_fdr_init else fdr.DataReader("USD/KRW")
+        # 미국 시장 마감 시점(T+1) 환율 적용을 위해 1일 가산
+        fx_date_obj = datetime.strptime(target_date, "%Y%m%d") + timedelta(days=1)
+        fx_target_date_fdr = fx_date_obj.strftime("%Y-%m-%d")
+        
+        # 해당일 환율 조회
+        df_usd = fdr.DataReader("USD/KRW", start=fx_target_date_fdr, end=fx_target_date_fdr)
+        if df_usd is None or df_usd.empty:
+            # 해당일 데이터가 없으면(주말 등) 7일 전부터의 데이터를 가져와서 마지막 영업일 환율 사용
+            start_search = (fx_date_obj - timedelta(days=7)).strftime("%Y-%m-%d")
+            df_usd = fdr.DataReader("USD/KRW", start=start_search, end=fx_target_date_fdr)
+            
         if df_usd is not None and not df_usd.empty:
             usdkrw_rate = float(df_usd['Close'].iloc[-1])
-            print(f"\n💵 적용 환율(USD/KRW): {usdkrw_rate:,.2f}원")
+            print(f"\n💵 {target_date} 적용 환율(USD/KRW): {usdkrw_rate:,.2f}원 (기준일: {fx_target_date_fdr})")
     except Exception as e:
         print(f"\n경고: 환율 조회 실패 ({e}). 기본값 {usdkrw_rate}원 적용.")
 
