@@ -217,74 +217,53 @@ def compare_tables(left, right, target_type="mine"):
         if avg_L > 0 and category not in ["E_기준만_존재", "D_나만_보유"]:
             if abs(avg_R - avg_L) / avg_L <= 0.03: is_minor_diff = True
         
-        avg_match_shares, avg_match_cost = 0, 0
-        if category == "B_평단맞춤_가능" and has_cur_price and qty_R > 0 and not is_minor_diff:
-            if cur_price < avg_L:
-                needed_x = (qty_R * (avg_L - avg_R)) / (cur_price - avg_L)
-                if needed_x > 0:
-                    avg_match_shares = int(needed_x)
-                    avg_match_cost = int(avg_match_shares * cur_price)
-        
-        qty_match_shares, qty_match_cost = 0, 0
-        if category not in ["A_유리함", "D_나만_보유"] and not is_minor_diff:
-            qty_match_shares = int(qty_L - qty_R)
-            qty_match_cost = int(abs(qty_match_shares) * cur_price) if has_cur_price else 0
-        
-        cash_sell_shares, cash_amount = 0, 0
-        if qty_R > qty_L and is_profit and has_cur_price:
-            cash_sell_shares = int(qty_R - qty_L)
-            cash_amount = int(cur_price * cash_sell_shares)
-        
         if is_minor_diff and category not in ["E_기준만_존재", "D_나만_보유"]: category = "F_거의일치"
+
+        # 1. 수량맞춤_필요주수 / 필요금액 (계산 가능하면 무조건 구함)
+        qty_match_shares, qty_match_cost = 0, 0
+        qty_match_shares = int(qty_L - qty_R)
+        if has_cur_price:
+            qty_match_cost = int(abs(qty_match_shares) * cur_price)
         
-        # F_거의일치: 수량차 음수일 때 추가 매수 시 예상 평단/손익률 계산
-        expected_avg, expected_pl_rate, expected_avg_gap, expected_pl_diff = None, None, None, None
-        if category == "F_거의일치" and qty_diff < 0 and has_cur_price and qty_R > 0:
-            buy_qty = abs(qty_diff)  # 추가 매수 수량
-            buy_cost = buy_qty * cur_price  # 추가 매수 금액
-            current_cost = qty_R * avg_R  # 현재 보유 금액
-            new_qty = qty_R + buy_qty  # 새 총 수량
-            new_cost = current_cost + buy_cost  # 새 총 매입금액
-            expected_avg = new_cost / new_qty if new_qty > 0 else 0  # 예상 평단
-            expected_pl_rate = ((cur_price - expected_avg) / expected_avg) if expected_avg > 0 else 0  # 예상 손익률
-            expected_avg_gap = expected_avg - avg_L  # 예상 평단갭
-            expected_pl_diff = expected_pl_rate - base_pl_rate  # 예상 손익률차
+        # 2. 평단맞춤_필요주수 / 필요금액 (계산 가능하면 무조건 구함)
+        avg_match_shares, avg_match_cost = 0, 0
+        if has_cur_price and qty_R > 0 and cur_price != avg_L:
+            needed_x = (qty_R * (avg_L - avg_R)) / (cur_price - avg_L)
+            if needed_x > 0:
+                avg_match_shares = int(needed_x)
+                avg_match_cost = int(avg_match_shares * cur_price)
         
-        # F_거의일치의 경우 수량맞춤/평단맞춤 컬럼을 예상값으로 활용
-        # 필요금액, 예상평단, 예상평단갭, 예상손익률, 예상손익률차 순서
-        need_cost = 0  # 필요 금액 (수량차 × 현재가)
+        # 3. 추가매수 시 예상 지표들 계산 (수량차 마이너스이고 현재가 있으면 무조건 계산)
+        need_cost = 0  # 필요 금액
         exp_avg = 0    # 예상 평단
         exp_avg_gap = 0  # 예상 평단갭
         exp_pl_rate = 0  # 예상 손익률
         exp_pl_diff = 0  # 예상 손익률차
+        pl_improve = 0   # 손익률개선
         
-        if category == "F_거의일치" and qty_diff < 0 and has_cur_price:
-            need_cost = int(abs(qty_diff) * cur_price)
-            if expected_avg is not None:
-                exp_avg = int(expected_avg)
-                exp_avg_gap = int(expected_avg_gap)
-                exp_pl_rate = round(expected_pl_rate, 4)
-                exp_pl_diff = round(expected_pl_diff, 4)
-        
-        # A_유리함: 기준손익률 마이너스이고 수량차 마이너스인 종목에 대해 예상값 계산
-        if category == "A_유리함" and base_pl_rate < 0 and qty_diff < 0 and has_cur_price and qty_R > 0:
-            buy_qty = abs(qty_diff)  # 추가 매수 수량
-            buy_cost = buy_qty * cur_price  # 추가 매수 금액
-            current_cost = qty_R * avg_R  # 현재 보유 금액
-            new_qty = qty_R + buy_qty  # 새 총 수량
-            new_cost = current_cost + buy_cost  # 새 총 매입금액
-            a_expected_avg = new_cost / new_qty if new_qty > 0 else 0  # 예상 평단
-            a_expected_pl_rate = ((cur_price - a_expected_avg) / a_expected_avg) if a_expected_avg > 0 else 0  # 예상 손익률
-            a_expected_avg_gap = a_expected_avg - avg_L  # 예상 평단갭
-            a_expected_pl_diff = a_expected_pl_rate - base_pl_rate  # 예상 손익률차
+        if qty_diff < 0 and has_cur_price and qty_R > 0:
+            buy_qty = abs(qty_diff)
+            buy_cost = buy_qty * cur_price
+            current_cost = qty_R * avg_R
+            new_qty = qty_R + buy_qty
+            new_cost = current_cost + buy_cost
+            expected_avg = new_cost / new_qty if new_qty > 0 else 0
+            expected_pl_rate = ((cur_price - expected_avg) / expected_avg) if expected_avg > 0 else 0
+            expected_avg_gap = expected_avg - avg_L
+            expected_pl_diff = expected_pl_rate - base_pl_rate
+            
             need_cost = int(buy_cost)
-            exp_avg = int(a_expected_avg)
-            exp_avg_gap = int(a_expected_avg_gap)
-            exp_pl_rate = round(a_expected_pl_rate, 4)
-            exp_pl_diff = round(a_expected_pl_diff, 4)
-        
-        # 손익률개선: 예상손익률 - 내손익률 (양수면 개선)
-        pl_improve = round(exp_pl_rate - pl_rate, 4) if (exp_pl_rate != 0) else 0
+            exp_avg = int(expected_avg)
+            exp_avg_gap = int(expected_avg_gap)
+            exp_pl_rate = round(expected_pl_rate, 4)
+            exp_pl_diff = round(expected_pl_diff, 4)
+            pl_improve = round(expected_pl_rate - pl_rate, 4)
+            
+        # 현금화_주수, 현금화_금액
+        cash_sell_shares, cash_amount = 0, 0
+        if qty_R > qty_L and is_profit and has_cur_price:
+            cash_sell_shares = int(qty_R - qty_L)
+            cash_amount = int(cur_price * cash_sell_shares)
 
         
         diff_results.append({
@@ -293,6 +272,9 @@ def compare_tables(left, right, target_type="mine"):
             "기준손익률": round(base_pl_rate, 4), "내손익률": round(pl_rate, 4),
             "평단갭": int(avg_gap) if avg_gap is not None else None,
             "현재가": int(cur_price), "기준_단가": int(avg_L), "내_단가": int(avg_R),
+            "기준_평가금액": int(row["eval_L"]), "내_평가금액": int(row["eval_R"]),
+            "기준_비중": round(row["weight_L"] / 100.0, 4) if row["weight_L"] else 0.0,
+            "내_비중": round(row["weight_R"] / 100.0, 4) if row["weight_R"] else 0.0,
             "수량차": int(qty_diff), "기준_수량": int(qty_L), "내_수량": int(qty_R),
             "수량맞춤_필요주수": qty_match_shares, "수량맞춤_필요금액": qty_match_cost,
             "평단맞춤_필요주수": avg_match_shares, "평단맞춤_필요금액": avg_match_cost,
@@ -341,13 +323,13 @@ def write_analysis_sheet(spreadsheet_key, title, df, cred_path):
     })
     requests.append({"updateSheetProperties": {"properties": {"sheetId": ws.id, "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 5}}, "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"}})
     
-    # 열 너비 조정: 카테고리/종목명 = 100, 나머지 = 80
+    # 1. 헤더 정리 및 컬럼-인덱스 매핑 생성
     header_list = list(df.columns)
-    for col_idx, col_name in enumerate(header_list):
-        if col_name in ["카테고리", "종목명"]:
-            pixel_width = 100
-        else:
-            pixel_width = 80
+    col_idx_map = {name: i for i, name in enumerate(header_list)}
+
+    # 열 너비 조정: 카테고리/종목명 = 100, 나머지 = 80
+    for col_name, col_idx in col_idx_map.items():
+        pixel_width = 100 if col_name in ["카테고리", "종목명"] else 80
         requests.append({
             "updateDimensionProperties": {
                 "range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": col_idx, "endIndex": col_idx + 1},
@@ -356,76 +338,96 @@ def write_analysis_sheet(spreadsheet_key, title, df, cred_path):
             }
         })
 
+    category_colors = {
+        "A_유리함": {"red": 0.85, "green": 0.95, "blue": 0.85}, 
+        "B_평단맞춤_가능": {"red": 0.85, "green": 0.92, "blue": 1.0}, 
+        "C_평단맞춤_불가": {"red": 1.0, "green": 0.95, "blue": 0.8}, 
+        "D_나만_보유": {"red": 0.9, "green": 0.95, "blue": 1.0}, 
+        "E_기준만_존재": {"red": 1.0, "green": 0.92, "blue": 0.85}, 
+        "F_거의일치": {"red": 0.95, "green": 0.95, "blue": 0.95}, 
+        "G_손실중": {"red": 1.0, "green": 0.88, "blue": 0.88}
+    }
+
+    # 조건부 포맷팅을 위한 루프
+    yellow_bg = {"red": 1.0, "green": 1.0, "blue": 0.0}
     
-    category_colors = {"A_유리함": {"red": 0.85, "green": 0.95, "blue": 0.85}, "B_평단맞춤_가능": {"red": 0.85, "green": 0.92, "blue": 1.0}, "C_평단맞춤_불가": {"red": 1.0, "green": 0.95, "blue": 0.8}, "D_나만_보유": {"red": 0.9, "green": 0.95, "blue": 1.0}, "E_기준만_존재": {"red": 1.0, "green": 0.92, "blue": 0.85}, "F_거의일치": {"red": 0.95, "green": 0.95, "blue": 0.95}, "G_손실중": {"red": 1.0, "green": 0.88, "blue": 0.88}}
+    # 미리 인덱스 추출 (존재 여부 확인 포함)
+    c_idx_qty_diff = col_idx_map.get("수량차")
+    c_idx_base_pl = col_idx_map.get("기준손익률")
+    c_idx_need_cost_match = col_idx_map.get("수량맞춤_필요금액")
+    c_idx_my_pl = col_idx_map.get("내손익률")
+    c_idx_avg_match_shares = col_idx_map.get("평단맞춤_필요주수")
+    c_idx_pl_improve = col_idx_map.get("손익률개선")
+
     for idx, row in df.iterrows():
         cat = row.get("카테고리")
+        s_row, e_row = idx + 1, idx + 2
+        
         if cat in category_colors:
-            requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": idx + 1, "endRowIndex": idx + 2, "startColumnIndex": 0, "endColumnIndex": len(df.columns)}, "cell": {"userEnteredFormat": {"backgroundColor": category_colors[cat]}}, "fields": "userEnteredFormat.backgroundColor"}})
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": ws.id, "startRowIndex": s_row, "endRowIndex": e_row, "startColumnIndex": 0, "endColumnIndex": len(header_list)}, 
+                    "cell": {"userEnteredFormat": {"backgroundColor": category_colors[cat]}}, 
+                    "fields": "userEnteredFormat.backgroundColor"
+                }
+            })
             
-    header_list = list(df.columns)
-    fmt_map = {"기준손익률": "0.00%", "내손익률": "0.00%", "손익률차": "0.00%", "예상손익률": "0.00%", "예상손익률차": "0.00%", "손익률개선": "0.00%", "기준_수량": "#,##0", "내_수량": "#,##0", "수량차": "#,##0", "기준_단가": "#,##0", "내_단가": "#,##0", "평단갭": "#,##0", "현재가": "#,##0", "수량맞춤_필요주수": "#,##0", "수량맞춤_필요금액": "#,##0", "평단맞춤_필요주수": "#,##0", "평단맞춤_필요금액": "#,##0", "필요금액": "#,##0", "예상평단": "#,##0", "예상평단갭": "#,##0", "현금화_주수": "#,##0", "현금화_금액": "#,##0"}
+        # 1. F_거의일치: 수량차 양수인 셀 노란색
+        if cat == "F_거의일치" and isinstance(c_idx_qty_diff, int):
+            if row.get("수량차", 0) > 0:
+                c_start, c_end = c_idx_qty_diff, c_idx_qty_diff + 1
+                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": s_row, "endRowIndex": e_row, "startColumnIndex": c_start, "endColumnIndex": c_end}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
+        
+        # 3. E_기준만_존재: 기준손익률 마이너스인 것의 수량맞춤_필요금액 노란색
+        if cat == "E_기준만_존재" and isinstance(c_idx_base_pl, int) and isinstance(c_idx_need_cost_match, int):
+            if row.get("기준손익률", 0) < 0:
+                c_start, c_end = c_idx_need_cost_match, c_idx_need_cost_match + 1
+                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": s_row, "endRowIndex": e_row, "startColumnIndex": c_start, "endColumnIndex": c_end}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
+        
+        # 4. A_유리함: 내손익률 음수인 경우 수량차 노란색
+        if cat == "A_유리함" and isinstance(c_idx_my_pl, int) and isinstance(c_idx_qty_diff, int):
+            if row.get("내손익률", 0) < 0:
+                c_start, c_end = c_idx_qty_diff, c_idx_qty_diff + 1
+                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": s_row, "endRowIndex": e_row, "startColumnIndex": c_start, "endColumnIndex": c_end}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
+        
+        # 5. B_평단맞춤_가능: 수량차 음수이고 평단맞춤_필요주수+수량차 여전히 음수면 평단맞춤_필요주수 노란색
+        if cat == "B_평단맞춤_가능" and isinstance(c_idx_qty_diff, int) and isinstance(c_idx_avg_match_shares, int):
+            qty_diff = row.get("수량차", 0)
+            avg_match = row.get("평단맞춤_필요주수", 0)
+            if qty_diff < 0 and (avg_match + qty_diff) < 0:
+                c_start, c_end = c_idx_avg_match_shares, c_idx_avg_match_shares + 1
+                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": s_row, "endRowIndex": e_row, "startColumnIndex": c_start, "endColumnIndex": c_end}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
+        
+        # 6. 손익률개선이 양수인 경우 손익률개선 셀 노란색 (모든 카테고리)
+        if isinstance(c_idx_pl_improve, int):
+            if row.get("손익률개선", 0) > 0:
+                c_start, c_end = c_idx_pl_improve, c_idx_pl_improve + 1
+                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": s_row, "endRowIndex": e_row, "startColumnIndex": c_start, "endColumnIndex": c_end}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
 
+    # 숫자 포맷 및 색상 지정 루프 (루프 외부에서 컬럼별로 일괄 처리 가능한 것들은 미리 처리됨)
+    fmt_map = {"기준손익률": "0.00%", "내손익률": "0.00%", "손익률차": "0.00%", "예상손익률": "0.00%", "예상손익률차": "0.00%", "손익률개선": "0.00%", "기준_수량": "#,##0", "내_수량": "#,##0", "수량차": "#,##0", "기준_단가": "#,##0", "내_단가": "#,##0", "기준_평가금액": "#,##0", "내_평가금액": "#,##0", "기준_비중": "0.00%", "내_비중": "0.00%", "평단갭": "#,##0", "현재가": "#,##0", "수량맞춤_필요주수": "#,##0", "수량맞춤_필요금액": "#,##0", "평단맞춤_필요주수": "#,##0", "평단맞춤_필요금액": "#,##0", "필요금액": "#,##0", "예상평단": "#,##0", "예상평단갭": "#,##0", "현금화_주수": "#,##0", "현금화_금액": "#,##0"}
 
     for col, fmt in fmt_map.items():
-        if col in header_list:
-            c_idx = header_list.index(col)
+        if col in col_idx_map:
+            c_idx = col_idx_map[col]
             requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(df) + 1, "startColumnIndex": c_idx, "endColumnIndex": c_idx + 1}, "cell": {"userEnteredFormat": {"numberFormat": {"type": "PERCENT" if "%" in fmt else "NUMBER", "pattern": fmt}}}, "fields": "userEnteredFormat.numberFormat"}})
-    
-    for col in ["손익률차", "내손익률", "기준손익률", "예상손익률", "예상손익률차"]:
-        if col in header_list:
-            c_idx = header_list.index(col)
+
+    # 개별 셀 색상 (양수/음수) 처리
+    color_cols = ["손익률차", "내손익률", "기준손익률", "예상손익률", "예상손익률차"]
+    for col in color_cols:
+        if col in col_idx_map:
+            c_idx = col_idx_map[col]
             for idx, r in df.iterrows():
                 val = r.get(col, 0)
                 if pd.isna(val) or val == 0: continue
                 color = {"red": 0.8, "green": 0.2, "blue": 0.2} if val > 0 else {"red": 0.2, "green": 0.2, "blue": 0.8}
                 requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": idx + 1, "endRowIndex": idx + 2, "startColumnIndex": c_idx, "endColumnIndex": c_idx + 1}, "cell": {"userEnteredFormat": {"textFormat": {"foregroundColor": color, "bold": True}}}, "fields": "userEnteredFormat.textFormat"}})
-    
-    # 기준_수량 열 bold 처리
-    if "기준_수량" in header_list:
-        c_idx = header_list.index("기준_수량")
+
+    # 기준_수량 bold 처리
+    if "기준_수량" in col_idx_map:
+        c_idx = col_idx_map["기준_수량"]
         requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(df) + 1, "startColumnIndex": c_idx, "endColumnIndex": c_idx + 1}, "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}}, "fields": "userEnteredFormat.textFormat.bold"}})
-    
-    # 조건부 노란색 음영 처리
-    yellow_bg = {"red": 1.0, "green": 1.0, "blue": 0.0}
-    for idx, row in df.iterrows():
-        cat = row.get("카테고리")
-        # 1. F_거의일치: 수량차 양수인 셀 노란색
-        if cat == "F_거의일치" and "수량차" in header_list:
-            qty_diff = row.get("수량차", 0)
-            if qty_diff > 0:
-                c_idx = header_list.index("수량차")
-                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": idx + 1, "endRowIndex": idx + 2, "startColumnIndex": c_idx, "endColumnIndex": c_idx + 1}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
-        
-        # 3. E_기준만_존재: 기준손익률 마이너스인 것의 수량맞춤_필요금액 노란색
-        if cat == "E_기준만_존재" and "기준손익률" in header_list and "수량맞춤_필요금액" in header_list:
-            base_pl = row.get("기준손익률", 0)
-            if base_pl < 0:
-                c_idx = header_list.index("수량맞춤_필요금액")
-                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": idx + 1, "endRowIndex": idx + 2, "startColumnIndex": c_idx, "endColumnIndex": c_idx + 1}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
-        
-        # 4. A_유리함: 내손익률 음수인 경우 수량차 노란색
-        if cat == "A_유리함" and "내손익률" in header_list and "수량차" in header_list:
-            my_pl = row.get("내손익률", 0)
-            if my_pl < 0:
-                c_idx = header_list.index("수량차")
-                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": idx + 1, "endRowIndex": idx + 2, "startColumnIndex": c_idx, "endColumnIndex": c_idx + 1}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
-        
-        # 5. B_평단맞춤_가능: 수량차 음수이고 평단맞춤_필요주수+수량차 여전히 음수면 평단맞춤_필요주수 노란색
-        if cat == "B_평단맞춤_가능" and "수량차" in header_list and "평단맞춤_필요주수" in header_list:
-            qty_diff = row.get("수량차", 0)
-            avg_match = row.get("평단맞춤_필요주수", 0)
-            if qty_diff < 0 and (avg_match + qty_diff) < 0:
-                c_idx = header_list.index("평단맞춤_필요주수")
-                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": idx + 1, "endRowIndex": idx + 2, "startColumnIndex": c_idx, "endColumnIndex": c_idx + 1}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
-        
-        # 6. F_거의일치 또는 A_유리함: 손익률개선이 양수인 경우 손익률개선 셀 노란색
-        if cat in ["F_거의일치", "A_유리함"] and "손익률개선" in header_list:
-            pl_improve = row.get("손익률개선", 0)
-            if pl_improve > 0:
-                c_idx = header_list.index("손익률개선")
-                requests.append({"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": idx + 1, "endRowIndex": idx + 2, "startColumnIndex": c_idx, "endColumnIndex": c_idx + 1}, "cell": {"userEnteredFormat": {"backgroundColor": yellow_bg}}, "fields": "userEnteredFormat.backgroundColor"}})
-    
+
     if requests: sh.batch_update({"requests": requests})
 
     print(f"[정보] 분석 결과가 '{title}' 탭에 저장되었습니다.")

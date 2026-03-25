@@ -40,9 +40,10 @@ def normalize_bg_color(bg_color: str) -> str:
     # HEX 코드 직접 분석 (#RRGGBB 형식)
     if c.startswith("#") and len(c) == 7:
         try:
-            r = int(c[1:3], 16)
-            g = int(c[3:5], 16)
-            b = int(c[5:7], 16)
+            # 유형 검사기 오판 방지 (Cannot index into str)
+            r = int(str(c)[1:3], 16)
+            g = int(str(c)[3:5], 16)
+            b = int(str(c)[5:7], 16)
             
             # 실제 매도 배경색 범위: R=192~199, G=238~240, B=205~215 (연녹색)
             # 녹색 성분이 높고, 빨강/파랑보다 녹색이 월등히 높으면 GREEN
@@ -95,7 +96,7 @@ CRED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "conf
 GEMINI_KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "gemini_key.txt")
 STOCK_MASTER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "stock_master.json")
 KRX_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "krx_code_cache.json")
-IMAGE_BASE_DIR = r"D:\텔레"
+IMAGE_BASE_DIR = r"D:\텔레\한국"
 OCR_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "ocr_cache")
 
 # 캐시 디렉토리 생성
@@ -188,6 +189,10 @@ def match_stock_name(ocr_name: str, ocr_code: str = None) -> tuple[str, bool]:
         ocr_name = "아모레퍼시픽홀딩스3우C"
         if not ocr_code:
             ocr_code = "00279K"
+
+    # CJ제일제당우 강제 변환
+    if ocr_name.replace(" ", "") == "CJ제일제당우":
+        ocr_name = "CJ제일제당 우"
 
     stock_master = load_stock_master()
     if not stock_master:
@@ -314,11 +319,14 @@ def extract_with_gemini(image_path: str, model_name: str = "gemini-2.5-flash") -
     try:
         from google import genai
         from google.genai import types
-    except ImportError:
+    except ImportError as e:
+        print(f"\n   ❌ Gemini 라이브러리 오류 (ImportError): {e}")
+        print("      (해결: pip install google-genai 명령어로 라이브러리를 재설치하세요)")
         return []
     
     api_key = load_gemini_key()
     if not api_key:
+        print("\n   ❌ Gemini API 키를 찾을 수 없습니다. (config/gemini_key.txt 확인)")
         return []
     
     # 이미지 분할 시도
@@ -332,6 +340,8 @@ def extract_with_gemini(image_path: str, model_name: str = "gemini-2.5-flash") -
     prompt = """이 이미지는 주식 매매 내역 테이블의 일부입니다.
 
 ⚠️ 중요 규칙:
+- 화면에 표시된 모든 주문 대상은 '대기중인 주문'과 '완료된 주문' 카테고리와 상관없이 모두 이날 당일 '매수'가 완료된 것으로 100% 간주하세요.
+- 매수 / 매도 구분이 불명확하더라도 화면 상의 주문들은 모조리 "매수" 항목으로 반환하세요.
 - '매도' 행은 연녹색(민트색) 배경 → bg_color: Green
 - '매수' 행은 흰색 배경 → bg_color: White
 - 글자색이 초록색이면 해당 행은 '매도'입니다
@@ -340,18 +350,18 @@ def extract_with_gemini(image_path: str, model_name: str = "gemini-2.5-flash") -
 
 테이블에서 추출할 정보:
 - 매매구분: "매수" 또는 "매도" (현금매수/코스매수/K-OTC매수 → 매수, 현금매도/코스매도/K-OTC매도 → 매도)
-- 종목코드: 6자리 숫자 (A 제외)
+- 종목코드: 6자리 숫자 (A 제외) 혹은 달러/티커 기호
 - 종목명
 - 수량: 숫자만
-- 단가: 숫자만 (소수점 이하 버림)
+- 단가: 숫자만 (소수점 포함, 달러 등의 기호 제외)
 - 배경색: 'Green' 또는 'White'
 
 📌 출력 형식 (CSV, 헤더 없음):
 매수,종목코드,종목명,수량,단가,배경색
 
 예시:
-매수,005930,삼성전자,10,55000,White
-매도,000660,SK하이닉스,5,120000,Green
+매수,AAPL,애플,10,225.50,White
+매도,TSLA,테슬라,5,300.20,Green
 
 모든 행을 빠짐없이 정확하게 추출하세요."""
 
@@ -387,10 +397,15 @@ def extract_with_gemini(image_path: str, model_name: str = "gemini-2.5-flash") -
         return all_trades
         
     except Exception as e:
-        err_msg = str(e)
-        print(f"   ❌ Gemini 오류: {e}")
-        if "quota" in err_msg.lower() or "rate" in err_msg.lower():
-            return []  # 할당량 초과
+        err_msg = str(e).lower()
+        if "quota" in err_msg or "rate" in err_msg:
+            print(f"   ❌ Gemini 할당량 초과: {e}")
+        elif "model" in err_msg or "not found" in err_msg:
+            print(f"   ❌ Gemini 모델 오류: {e} (모델명 '{model_name}' 확인)")
+        elif "invalid" in err_msg and "key" in err_msg:
+            print(f"   ❌ Gemini API 키 오류: {e}")
+        else:
+            print(f"   ❌ Gemini 일반 오류: {e}")
         return []
 
 
@@ -1061,8 +1076,19 @@ def main():
     args = parser.parse_args()
     
     date_str = args.date.replace("-", "").replace("/", "")
+    if args.image:
+        image_name = os.path.basename(args.image)
+        name_without_ext = os.path.splitext(image_name)[0]
+        # "260225" 같은 6자리 형식에서 날짜 추출 ("20260225")
+        if name_without_ext.isdigit() and len(name_without_ext) == 6:
+            year = "20" + name_without_ext[:2]
+            month = name_without_ext[2:4]
+            day = name_without_ext[4:]
+            date_str = f"{year}{month}{day}"
+            print(f"📸 이미지 파일명(YYMMDD)에서 날짜 자동 추출: {date_str}")
+    
     if not date_str.isdigit() or len(date_str) != 8:
-        print(f"❌ 날짜 형식 오류: {args.date}")
+        print(f"❌ 날짜 형식 오류: {date_str}")
         sys.exit(1)
     
     image_path = args.image if args.image else build_image_path(date_str)

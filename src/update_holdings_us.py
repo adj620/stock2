@@ -12,17 +12,53 @@ import json;
 
 # 공통 모듈에서 마스터 데이터 및 유틸리티 함수 import
 from lib.stock_utils import (
-    STOCK_MASTER,
-    _get_code_from_master,
-    _get_sector_from_master,
-    _load_code_cache,
-    _save_code_cache,
-    _search_code_from_naver,
-    _get_code_for_name,
-    get_naver_current_price as get_kotc_price,  # 호환성 유지
-    fetch_krx_listings_custom as _fetch_krx_listings_custom,
-    KOTC_MANUAL_PRICES,
+    STOCK_MASTER
 )
+
+def _load_us_stock_master():
+    import json
+    import os
+    master_path = os.path.join(os.getcwd(), "data", "us_stock_master.json")
+    if not os.path.exists(master_path):
+        return {}
+    try:
+        with open(master_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {title: info.get("code", "") for title, info in data.items() if isinstance(info, dict)}
+    except:
+        return {}
+
+
+def _save_us_stock_master(name_to_code: dict):
+    """현재 메모리의 name_to_code 매핑을 파일에 저장 (보강용)"""
+    import json
+    import os
+    master_path = os.path.join(os.getcwd(), "data", "us_stock_master.json")
+    if not os.path.exists(os.path.dirname(master_path)):
+        os.makedirs(os.path.dirname(master_path), exist_ok=True)
+    
+    # 기존 파일 읽어서 구조 유지하며 업데이트
+    current_data = {}
+    if os.path.exists(master_path):
+        try:
+            with open(master_path, "r", encoding="utf-8") as f:
+                current_data = json.load(f)
+        except:
+            pass
+
+    updated = False
+    for name, code in name_to_code.items():
+        if name not in current_data:
+            current_data[name] = {"code": code, "market": "US"} # 기본값
+            updated = True
+    
+    if updated:
+        try:
+            with open(master_path, "w", encoding="utf-8") as f:
+                json.dump(current_data, f, ensure_ascii=False, indent=2)
+                print(f"[INFO] 종목 마스터 파일이 업데이트되었습니다: {master_path}")
+        except Exception as e:
+            print(f"[ERROR] 종목 마스터 파일 저장 실패: {e}")
 
 
 def _normalize_header(s: str) -> str:
@@ -297,25 +333,25 @@ def _load_kr_holidays_json() -> set[str]:
 
 def get_previous_business_day(date_obj: datetime, holidays: set[str] | None = None) -> datetime:
     if holidays is None:
-        holidays = set();
+        holidays = set()
     
-    # 한국 공휴일 JSON 파일 로드 (설날, 추석, 대체공휴일 포함)
-    kr_holidays = _load_kr_holidays_json();
+    try:
+        from pandas.tseries.holiday import USFederalHolidayCalendar
+        cal = USFederalHolidayCalendar()
+        start_str = f"{date_obj.year-1}-01-01"
+        end_str = f"{date_obj.year+1}-12-31"
+        us_holidays = set(cal.holidays(start=start_str, end=end_str).strftime("%Y%m%d"))
+    except Exception:
+        us_holidays = set()
+        
+    # 성금요일(Good Friday) 등 일부는 USFederalHolidayCalendar에 없지만,
+    # FDR 등에서 자동으로 최신 영업일 종가를 쓰기 때문에 큰 문제는 되지 않습니다.
+    combined_holidays = holidays.union(us_holidays)
     
-    # 기본 공휴일 목록 (한국 주식 시장 기준 양력 고정 휴장일 - fallback)
-    base_holidays = {
-        f"{date_obj.year-1}1225", f"{date_obj.year-1}1231",
-        f"{date_obj.year}0101", f"{date_obj.year}0301", f"{date_obj.year}0505",
-        f"{date_obj.year}0606", f"{date_obj.year}0815", f"{date_obj.year}1003",
-        f"{date_obj.year}1009", f"{date_obj.year}1225", f"{date_obj.year}1231",
-        f"{date_obj.year+1}0101"
-    };
-    combined_holidays = holidays.union(base_holidays).union(kr_holidays);
-    
-    d = date_obj - timedelta(days=1);
+    d = date_obj - timedelta(days=1)
     while d.weekday() >= 5 or d.strftime("%Y%m%d") in combined_holidays:  # 5: 토, 6: 일
-        d -= timedelta(days=1);
-    return d;
+        d -= timedelta(days=1)
+    return d
 
 
 def read_google_sheet(spreadsheet_key: str, gid: int | None = None, cred_path: str | None = None) -> pd.DataFrame:
@@ -388,9 +424,10 @@ def _apply_google_sheet_formatting(ws, num_rows: int) -> None:
         header_map = {v: i + 1 for i, v in enumerate(header)};
         
         int_cols = ["잔고수량", "수량차이"];
-        money_cols = ["평균단가", "현재가", "매입금액", "평가금액", "미실현손익", "평단차이", "금액차이"];
+        money_cols = ["평균단가", "현재가", "매입금액", "평가금액", "미실현손익", "평단차이"];
+        usd_money_cols = ["평균단가(USD)", "현재가(USD)", "매입금액(USD)", "평가금액(USD)", "미실현손익(USD)", "평단차이(USD)"];
         percent_cols = ["손익률", "보유비중", "일일등락", "52주위치"];
-        diff_percent_cols = ["비중차이"];
+        diff_percent_cols = [];
         
         # 숫자 서식 적용
         requests = [];
@@ -433,6 +470,28 @@ def _apply_google_sheet_formatting(ws, num_rows: int) -> None:
                         "cell": {
                             "userEnteredFormat": {
                                 "numberFormat": {"type": "NUMBER", "pattern": "#,##0"}
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat"
+                    }
+                });
+        
+        # USD 금액 서식
+        for col_name in usd_money_cols:
+            if col_name in header_map:
+                col_idx = header_map[col_name];
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "startRowIndex": 1,
+                            "endRowIndex": num_rows + 1,
+                            "startColumnIndex": col_idx - 1,
+                            "endColumnIndex": col_idx,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {"type": "CURRENCY", "pattern": "$#,##0.00"}
                             }
                         },
                         "fields": "userEnteredFormat.numberFormat"
@@ -619,11 +678,26 @@ def _apply_google_sheet_formatting(ws, num_rows: int) -> None:
             }
         });
         
-        # 열 너비 고정: 종목명=150px, 기타=100px
+        # 열 너비 고정: 종목명=120px, 종목코드=65px, 기타=85px (컴팩트하게)
         try:
             header_list = header;
             for idx, title in enumerate(header_list):
-                pixel = 150 if str(title).strip() == "종목명" else 100;
+                t = str(title).strip();
+                if t == "종목명":
+                    pixel = 120;
+                elif t == "종목코드":
+                    pixel = 65;
+                elif t == "잔고수량":
+                    pixel = 60;
+                elif "USD" in t:
+                    pixel = 95; # USD 금액은 약간 더 공간 필요
+                elif t in ["보유비중", "손익률", "일일등락"]:
+                    pixel = 80;
+                elif t == "섹터":
+                    pixel = 120;
+                else:
+                    pixel = 85;
+                
                 requests.append({
                     "updateDimensionProperties": {
                         "range": {
@@ -765,11 +839,17 @@ def write_google_sheet(spreadsheet_key: str, title: str, df: pd.DataFrame, cred_
     # 평가금액 = 현재가 × 수량 (고정)
     df_out["eval"] = (df_out["current"] * df_out["qty"]).round(0);
     
+    # USD 평가금액 = USD 현재가 × 수량 (추가)
+    if "current_usd" in df_out.columns:
+        df_out["eval_usd"] = (df_out["current_usd"] * df_out["qty"]).round(2);
+    
     # 매입금액 = 평균단가 × 수량 (고정, 대체식 금지)
-    df_out["purchase"] = (df_out["avg"] * df_out["qty"]).round(0);
+    # [NEW] purchase_krw가 계산되어 있으면 활용, 없으면 직접 계산
+    if "purchase_krw" not in df_out.columns:
+        df_out["purchase_krw"] = (df_out["avg"] * df_out["qty"]).round(0);
     
     # 미실현손익 = 평가금액 - 매입금액 (고정)
-    df_out["pl"] = (df_out["eval"] - df_out["purchase"]).round(0);
+    df_out["pl"] = (df_out["eval"] - df_out["purchase_krw"]).round(0);
     
     # 손익률(%) = ((현재가 / 평균단가) - 1) × 100 (고정)
     def calc_rate(row):
@@ -787,10 +867,19 @@ def write_google_sheet(spreadsheet_key: str, title: str, df: pd.DataFrame, cred_
     total_eval = float(df_out["eval"].sum()) if len(df_out) else 0.0;
     df_out["weight"] = df_out["eval"].apply(lambda v: (float(v) / total_eval * 100.0) if total_eval > 0 else 0.0);
     cols_order = [
-        ("name", "종목명"), ("qty", "잔고수량"), ("avg", "평균단가"), ("current", "현재가"), ("purchase", "매입금액"), ("eval", "평가금액"),
-        ("pl", "미실현손익"), ("rate", "손익률"), ("weight", "보유비중"),
+        ("code", "종목코드"), ("name", "종목명"), ("qty", "잔고수량"),
+        ("rate", "손익률"), # 손익률 위치 이동
+        # 외화 (USD) 컬럼 먼저 배치
+        ("avg_usd", "평균단가(USD)"), ("current_usd", "현재가(USD)"), 
+        ("purchase_usd", "매입금액(USD)"), ("eval_usd", "평가금액(USD)"), 
+        ("pl_usd", "미실현손익(USD)"), ("diff_avg_usd", "평단차이(USD)"),
+        # 원화 (KRW) 컬럼 배치
+        ("avg", "평균단가"), ("current", "현재가"), 
+        ("purchase_krw", "매입금액"), ("eval", "평가금액"), 
+        ("pl", "미실현손익"), ("diff_avg", "평단차이"),
+        # 기타 지표
+        ("weight", "보유비중"),
         ("diff_qty", "수량차이"),
-        ("diff_avg", "평단차이"), ("diff_eval", "금액차이"), ("diff_weight", "비중차이"),
         ("sector", "섹터"),
     ];
     # 비중 기준 정렬 (내림차순)
@@ -798,12 +887,9 @@ def write_google_sheet(spreadsheet_key: str, title: str, df: pd.DataFrame, cred_
     # 퍼센트 컬럼을 Excel 퍼센트 서식에 맞게 분수로 변환
     df_out["rate"] = pd.to_numeric(df_out["rate"], errors="coerce").fillna(0.0) / 100.0;
     df_out["weight"] = pd.to_numeric(df_out["weight"], errors="coerce").fillna(0.0) / 100.0;
-    # diff_weight 재계산
-    if "diff_weight" in df_out.columns and "_b_weight" in df_out.columns:
-        df_out["diff_weight"] = df_out["weight"] - df_out["_b_weight"];
-    # 신규 종목의 비중차이는 0으로 설정 (NaN 방지)
+    # 비중 차이 계산 대신 비어두기 (요청에 따라 제거)
     if "diff_weight" in df_out.columns:
-        df_out["diff_weight"] = df_out["diff_weight"].fillna(0.0);
+        df_out["diff_weight"] = 0.0;
     renamed = {src: dst for src, dst in cols_order};
     present_cols = [src for src, _ in cols_order if src in df_out.columns];
     df_export = df_out[present_cols].rename(columns=renamed);
@@ -856,71 +942,42 @@ def _save_sector_mapping(code_to_sector: dict[str, str], name_to_sector: dict[st
 
 
 
-def _fetch_sector_from_naver(code: str) -> str:
-    """네이버 증권에서 종목의 섹터(업종) 정보를 페치 (마스터 테이블 우선 탐색)"""
-    if not code or len(code) < 6:
-        return "";
+def _fetch_sector_info_fdr(code: str) -> str:
+    """FDR StockListing에서 종목의 Industry(섹터) 정보를 가져옴"""
+    # 전역 캐시 변수 (메모리 내)
+    if not hasattr(_fetch_sector_info_fdr, "cache"):
+        _fetch_sector_info_fdr.cache = None;
+
+    if _fetch_sector_info_fdr.cache is None:
+        try:
+            import FinanceDataReader as fdr;
+            print("[INFO] 미국 주식 섹터 정보 로딩 중 (NASDAQ, NYSE, AMEX)...");
+            nasdaq = fdr.StockListing("NASDAQ");
+            nyse = fdr.StockListing("NYSE");
+            amex = fdr.StockListing("AMEX");
+            all_listings = pd.concat([nasdaq, nyse, amex], ignore_index=True);
+            # Symbol(티커)를 인덱스로 한 Industry 딕셔너리 생성
+            if "Symbol" in all_listings.columns and "Industry" in all_listings.columns:
+                _fetch_sector_info_fdr.cache = all_listings.set_index("Symbol")["Industry"].to_dict();
+            else:
+                _fetch_sector_info_fdr.cache = {};
+        except Exception as e:
+            print(f"[경고] 섹터 정보 로딩 실패: {e}");
+            _fetch_sector_info_fdr.cache = {};
+
+    # 캐시에서 티커로 찾기 (대소문자 및 공백 제거)
+    target_code = str(code).strip().upper();
+    sector = _fetch_sector_info_fdr.cache.get(target_code);
+    if not sector:
+        # 혹시 모르니 다시 한번 시도 (인덱스가 문자열인 경우 대비)
+        sector = _fetch_sector_info_fdr.cache.get(target_code.strip());
     
-    # 0. 마스터 테이블에서 섹터 정보 가져오기
-    master_sector = _get_sector_from_master(code)
-    if master_sector: return master_sector
-    try:
-        import requests;
-        from bs4 import BeautifulSoup;
-        import re;
-        url = f"https://finance.naver.com/item/main.naver?code={code}";
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"};
-        resp = requests.get(url, headers=headers, timeout=5);
-        if resp.status_code != 200:
-            return "";
-        soup = BeautifulSoup(resp.text, "html.parser");
-        
-        # 방법 1: h4 및 하위 a 태그 (가장 최신/정확)
-        for h4 in soup.find_all("h4"):
-            text = h4.get_text()
-            if "업종" in text:
-                # h4 내부 또는 바로 다음의 a 태그 탐색
-                target_a = h4.find_next("a")
-                if target_a:
-                    sector = target_a.get_text(strip=True)
-                    if sector and not any(k in sector for k in ["비교", "정보", "전일대비", "%", "배", "기준"]):
-                        return sector
+    return sector if sector else "US Stock";
 
-        # 방법 2: dl/dt/dd 구조
-        dt_tags = soup.find_all("dt")
-        for dt in dt_tags:
-            if "업종" in dt.get_text():
-                dd = dt.find_next_sibling("dd")
-                if dd:
-                    sector = dd.get_text(strip=True)
-                    sector = re.sub(r"\s*\(.*$", "", sector).strip()
-                    if sector and not any(k in sector for k in ["%", "배", "비교"]):
-                        return sector
 
-        # 방법 3: th/td 구조
-        th_tags = soup.find_all("th")
-        for th in th_tags:
-            if "업종" in th.get_text():
-                td = th.find_next_sibling("td")
-                if td:
-                    sector = td.get_text(strip=True)
-                    sector = re.sub(r"\s*\(.*$", "", sector).strip()
-                    if sector and not any(k in sector for k in ["%", "배", "비교"]):
-                        return sector
-
-        # 방법 4: '업종명' 텍스트 기반 검색
-        all_a = soup.find_all("a")
-        for a in all_a:
-            href = a.get("href", "")
-            if "upjong" in href or "field" in href:
-                sector = a.get_text(strip=True)
-                if sector and len(sector) > 1 and len(sector) < 20:
-                    if not any(k in sector for k in ["비교", "정보", "전일대비", "%", "배", "기준"]):
-                        return sector
-                    
-        return "";
-    except Exception:
-        return "";
+def _fetch_sector_from_naver(code: str) -> str:
+    """섹터 정보 폴백 (현재는 FDR 사용)"""
+    return _fetch_sector_info_fdr(code);
 
 
 def _apply_sector_info(df: pd.DataFrame, code_to_sector: dict[str, str], name_to_sector: dict[str, str]) -> pd.DataFrame:
@@ -1089,56 +1146,29 @@ def get_required_columns_for_trades(df: pd.DataFrame, override: dict | None = No
     return {"code": code_col, "name": name_col, "side": side_col, "qty": qty_col, "price": price_col, "sign": sign_col};
 
 
-    grouped = out.groupby(["code", "name", "type"], dropna=False);
-    result = grouped.apply(weighted_avg_func);
-    if isinstance(result.index, pd.MultiIndex):
-        out = result.reset_index();
-    else:
-        out = result.reset_index(drop=True);
-    out = out[out["code"] != ""];
-    # 코드가 비어있는 행이 모두라면 이름 기준으로 사용
-    if out.empty:
-        out = pd.DataFrame({
-            "code": ["" for _ in range(len(df))],
-            "name": (df[cols["name"]].map(norm_name) if cols["name"] else pd.Series([""] * len(df))),
-            "type": df[cols["type"]] if cols.get("type") else "",
-            "qty": pd.to_numeric(df[cols["qty"]], errors="coerce").fillna(0).astype(int),
-            "avail": pd.to_numeric(df[cols["avail"]], errors="coerce").fillna(pd.to_numeric(df[cols["qty"]], errors="coerce")).fillna(0).astype(int) if cols.get("avail") else pd.to_numeric(df[cols["qty"]], errors="coerce").fillna(0).astype(int),
-            "avg": pd.to_numeric(df[cols["avg"]], errors="coerce").fillna(0.0),
-            "current": 0.0,  # 현재가는 항상 API로 업데이트하므로 0으로 초기화
-        });
-        # 가중평균 계산을 위해 그룹화 함수 정의
-        def weighted_avg_func_name(group):
-            qty_sum = group["qty"].sum();
-            if qty_sum > 0:
-                avg_weighted = (group["avg"] * group["qty"]).sum() / qty_sum;
-            else:
-                avg_weighted = group["avg"].mean();
-            return pd.Series({
-                "qty": qty_sum,
-                "avail": group["avail"].sum(),
-                "avg": avg_weighted,
-                "current": group["current"].max(),
-            });
-        grouped_name = out.groupby(["name", "type"], dropna=False);
-        result_name = grouped_name.apply(weighted_avg_func_name);
-        if isinstance(result_name.index, pd.MultiIndex):
-            out = result_name.reset_index();
-        else:
-            out = result_name.reset_index(drop=True);
-        # 코드 정보가 없으므로 빈 값으로 유지
-        out.insert(0, "code", "");
-    return out.reset_index(drop=True);
-
-
 def parse_holdings_df(df: pd.DataFrame, override: dict | None = None) -> pd.DataFrame:
     cols = get_required_columns_for_holdings(df, override);
     def norm_name(x):
         if pd.isna(x):
             return "";
         return str(x).strip();
+    
+    # [REFORM] 초기 로딩 시점에 티커 매칭 강화
+    name_to_code = _load_us_stock_master();
+    
+    def get_code(row):
+        c = str(row[cols["code"]]).strip() if cols["code"] else "";
+        if not c or c == "nan":
+            n = str(row[cols["name"]]).strip();
+            if n in name_to_code:
+                return name_to_code[n];
+            import re as _re;
+            if _re.match(r'^[A-Z]{1,5}$', n):
+                return n;
+        return c;
+
     out = pd.DataFrame({
-        "code": df[cols["code"]].map(normalize_code) if cols["code"] else "",
+        "code": df.apply(get_code, axis=1),
         "name": df[cols["name"]].map(norm_name) if cols["name"] else "",
         "type": df[cols["type"]] if cols.get("type") else "",
         "qty": pd.to_numeric(df[cols["qty"]], errors="coerce").fillna(0).astype(int),
@@ -1146,11 +1176,10 @@ def parse_holdings_df(df: pd.DataFrame, override: dict | None = None) -> pd.Data
         "avg": pd.to_numeric(df[cols["avg"]], errors="coerce").fillna(0.0),
         "current": 0.0,
         "eval": pd.to_numeric(df[cols["eval"]], errors="coerce").fillna(0.0) if cols.get("eval") else 0.0,
-        "pl": pd.to_numeric(df[cols["pl"]], errors="coerce").fillna(0.0) if cols.get("pl") else 0.0,
-        "rate": pd.to_numeric(df[cols["rate"]], errors="coerce").fillna(0.0) if cols.get("rate") else 0.0,
-        "weight": pd.to_numeric(df[cols["weight"]], errors="coerce").fillna(0.0) if cols.get("weight") else 0.0,
     });
-    grouped = out.groupby(["code", "name", "type"], dropna=False);
+
+    # [REFORM] 종목코드(code) 기준으로 그룹화하여 반환
+    grouped = out.groupby(["code"], dropna=False);
     def weighted_avg_func(group):
         qty_sum = group["qty"].sum();
         if qty_sum > 0:
@@ -1158,49 +1187,16 @@ def parse_holdings_df(df: pd.DataFrame, override: dict | None = None) -> pd.Data
         else:
             avg_weighted = group["avg"].mean();
         return pd.Series({
+            "name": group["name"].iloc[0],
+            "type": group["type"].iloc[0] if "type" in group.columns else "",
             "qty": qty_sum,
             "avail": group["avail"].sum(),
             "avg": avg_weighted,
             "current": group["current"].max(),
             "eval": group["eval"].sum() if "eval" in group else 0.0,
-            "pl": group["pl"].sum() if "pl" in group else 0.0,
-            "rate": group["rate"].mean() if "rate" in group else 0.0,
-            "weight": group["weight"].sum() if "weight" in group else 0.0,
         });
     result = grouped.apply(weighted_avg_func);
-    if isinstance(result.index, pd.MultiIndex):
-        out2 = result.reset_index();
-    else:
-        out2 = result.reset_index(drop=True);
-    out2 = out2[out2["code"] != ""] if "code" in out2.columns else out2;
-    if out2.empty:
-        # 이름 기준으로 재시도
-        out2 = pd.DataFrame({
-            "code": ["" for _ in range(len(df))],
-            "name": (df[cols["name"]].map(norm_name) if cols["name"] else pd.Series([""] * len(df))),
-            "type": df[cols["type"]] if cols.get("type") else "",
-            "qty": pd.to_numeric(df[cols["qty"]], errors="coerce").fillna(0).astype(int),
-            "avail": pd.to_numeric(df[cols["avail"]], errors="coerce").fillna(pd.to_numeric(df[cols["qty"]], errors="coerce")).fillna(0).astype(int) if cols.get("avail") else pd.to_numeric(df[cols["qty"]], errors="coerce").fillna(0).astype(int),
-            "avg": pd.to_numeric(df[cols["avg"]], errors="coerce").fillna(0.0),
-            "current": 0.0,
-        });
-        grouped_name = out2.groupby(["name", "type"], dropna=False);
-        def weighted_avg_func_name(group):
-            qty_sum = group["qty"].sum();
-            if qty_sum > 0:
-                avg_weighted = (group["avg"] * group["qty"]).sum() / qty_sum;
-            else:
-                avg_weighted = group["avg"].mean();
-            return pd.Series({
-                "qty": qty_sum,
-                "avail": group["avail"].sum(),
-                "avg": avg_weighted,
-                "current": group["current"].max(),
-            });
-        result_name = grouped_name.apply(weighted_avg_func_name);
-        out2 = result_name.reset_index() if isinstance(result_name.index, pd.MultiIndex) else result_name.reset_index(drop=True);
-        out2.insert(0, "code", "");
-    return out2.reset_index(drop=True);
+    return result.reset_index();
 
 
 def load_trades(gsheet_key: str, gsheet_title: str | None = None, gsheet_gid: int | None = None, cred_path: str | None = None, filter_today: bool = True, target_date: str = None, override: dict | None = None) -> pd.DataFrame:
@@ -1243,6 +1239,20 @@ def load_trades(gsheet_key: str, gsheet_title: str | None = None, gsheet_gid: in
         return str(x).strip();
     codes = df[cols["code"]].map(normalize_code) if cols["code"] else pd.Series([""] * len(df));
     names = df[cols["name"]].map(norm_name) if cols["name"] else pd.Series([""] * len(df));
+    
+    # [NEW] 한글 종목명 -> 티커 매칭 강화
+    name_to_code = _load_us_stock_master();
+    for i in range(len(codes)):
+        if not codes.iloc[i] and names.iloc[i]:
+            # 종목명이 한글이면 매핑 파일에서 찾기
+            n = names.iloc[i];
+            if n in name_to_code:
+                codes.iloc[i] = name_to_code[n];
+            else:
+                # 종목명 자체가 티커 형식인지 다시 한 번 확인
+                import re as _re;
+                if _re.match(r'^[A-Z]{1,5}$', n):
+                    codes.iloc[i] = n;
     qty = pd.to_numeric(df[cols["qty"]].astype(str).str.replace(",", ""), errors="coerce").fillna(0).astype(int);
     price = pd.to_numeric(df[cols["price"]].astype(str).str.replace(",", ""), errors="coerce").fillna(0.0);
     side_series = df[cols["side"]].map(normalize_side) if cols["side"] else "";
@@ -1268,7 +1278,7 @@ def load_trades(gsheet_key: str, gsheet_title: str | None = None, gsheet_gid: in
     return trades.reset_index(drop=True);
 
 
-def apply_trades_to_holdings(holdings: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
+def apply_trades_to_holdings(holdings: pd.DataFrame, trades: pd.DataFrame, usdkrw_rate: float = 1450.0) -> pd.DataFrame:
     idx_by_code = {c: i for i, c in enumerate(holdings["code"]) if isinstance(c, str) and c};
     idx_by_name = {n: i for i, n in enumerate(holdings["name"]) if isinstance(n, str) and n};
     code_list = holdings["code"].tolist();
@@ -1277,6 +1287,8 @@ def apply_trades_to_holdings(holdings: pd.DataFrame, trades: pd.DataFrame) -> pd
     qty_list = holdings["qty"].tolist();
     avail_list = holdings.get("avail", pd.Series(qty_list)).tolist();
     avg_list = holdings["avg"].tolist();
+    # [NEW] avg_usd는 기존 시트에 있으면 읽고, 없으면 0.0 (나중에 환산)
+    avg_usd_list = holdings.get("avg_usd", pd.Series([0.0] * len(holdings))).tolist();
     current_list = holdings.get("current", pd.Series([0.0] * len(holdings))).astype(float).tolist();
     updated_flags = [False] * len(code_list);
 
@@ -1301,7 +1313,8 @@ def apply_trades_to_holdings(holdings: pd.DataFrame, trades: pd.DataFrame) -> pd
             qty_list.append(0);
             avail_list.append(0);
             avg_list.append(0.0);
-            current_list.append(float(price) if price else 0.0);
+            avg_usd_list.append(0.0);
+            current_list.append(0.0);
             i = len(code_list) - 1;
             # updated_flags 리스트 확장
             while len(updated_flags) <= i:
@@ -1314,15 +1327,23 @@ def apply_trades_to_holdings(holdings: pd.DataFrame, trades: pd.DataFrame) -> pd
             i = key_index;
         cur_qty = int(qty_list[i]);
         cur_avg = float(avg_list[i]);
+        cur_avg_usd = float(avg_usd_list[i]);
+        
+        # [NEW] 원화 체결가(price)를 해당일 환율로 나누어 USD 체결가 계산
+        price_usd = round(price / usdkrw_rate, 4) if usdkrw_rate > 0 else 0.0;
+        
         if side == "buy" or t_qty > 0:
             new_qty = cur_qty + abs(t_qty);
             if new_qty == 0:
                 new_avg = 0.0;
+                new_avg_usd = 0.0;
             else:
                 new_avg = ((cur_qty * cur_avg) + (abs(t_qty) * price)) / new_qty;
+                new_avg_usd = ((cur_qty * cur_avg_usd) + (abs(t_qty) * price_usd)) / new_qty;
             qty_list[i] = new_qty;
             avail_list[i] = new_qty;
             avg_list[i] = new_avg;
+            avg_usd_list[i] = new_avg_usd;
             # 현재가는 체결가로 덮어쓰지 않음 (서버 가격으로만 갱신)
             if not name_list[i] and name:
                 name_list[i] = name;
@@ -1341,16 +1362,26 @@ def apply_trades_to_holdings(holdings: pd.DataFrame, trades: pd.DataFrame) -> pd
             # 알 수 없는 side: 수량 부호로만 처리됨, 위에서 모두 처리됨
             pass;
 
-    updated = pd.DataFrame({"code": code_list, "name": name_list, "type": type_list, "qty": qty_list, "avail": avail_list, "avg": avg_list, "current": current_list, "_updated": updated_flags});
+    updated = pd.DataFrame({
+        "code": code_list, 
+        "name": name_list, 
+        "type": type_list, 
+        "qty": qty_list, 
+        "avail": avail_list, 
+        "avg": avg_list, 
+        "avg_usd": avg_usd_list,
+        "current": current_list, 
+        "_updated": updated_flags
+    });
     updated = updated[updated["qty"] != 0];
     # 정렬: 코드 우선, 코드 없으면 이름으로
     updated = updated.sort_values(by=["code", "name"]).reset_index(drop=True);
-    # 파생 컬럼 계산
-    updated = compute_metrics(updated);
+    # 파생 컬럼 계산 (이미 usdkrw_rate를 받았으므로 적용)
+    updated = compute_metrics(updated, usdkrw_rate=usdkrw_rate);
     return updated;
 
 
-def compute_metrics(df: pd.DataFrame, preserve_eval: bool = False) -> pd.DataFrame:
+def compute_metrics(df: pd.DataFrame, usdkrw_rate: float = 1.0, preserve_eval: bool = False) -> pd.DataFrame:
     out = df.copy();
     # preserve_eval이 True이고 eval이 이미 있으면 재계산하지 않음
     if preserve_eval and "eval" in out.columns and out["eval"].notna().any():
@@ -1358,9 +1389,50 @@ def compute_metrics(df: pd.DataFrame, preserve_eval: bool = False) -> pd.DataFra
     else:
         eval_preserved = None;
     out["eval"] = (pd.to_numeric(out["current"], errors="coerce").fillna(0.0) * pd.to_numeric(out["qty"], errors="coerce").fillna(0)).round(0);
+    
+    # USD 금액 계산 (모든 금액에 대해)
+    if usdkrw_rate > 0:
+        # [FIX] 현재가(USD)가 원화와 거의 동일하고 값이 큰 경우(KRW 오기입) 재계산 시도
+        # 미국 주식 가격이 보통 $5000 이하임을 감안 (버크셔 등 제외)
+        if "current_usd" in out.columns and "current" in out.columns:
+            # 두 값이 동일하고 5000 이상이면 USD 컬럼에 KRW가 들어간 것으로 간주
+            mask = (out["current_usd"] == out["current"]) & (out["current"] > 5000);
+            if mask.any():
+                out.loc[mask, "current_usd"] = (out.loc[mask, "current"] / usdkrw_rate).round(4);
+
+        # 현재가(USD)가 없는 경우 원화에서 역산 (보조용)
+        if "current_usd" not in out.columns:
+            out["current_usd"] = (out["current"] / usdkrw_rate).round(4);
+        
+        # 현재가(USD)는 있는데 원화가 없는 경우 (가능성은 낮지만 보완)
+        if "current" not in out.columns or out["current"].isna().all() or (out["current"] == 0).all():
+             out["current"] = (out["current_usd"] * usdkrw_rate).round(0);
+
+        # 평균단가(USD) - 이미 존재하면(apply_trades에서 계산됨) 보존, 없으면 환산
+        if "avg_usd" not in out.columns or (out["avg_usd"] == 0).all():
+            out["avg_usd"] = (out["avg"] / usdkrw_rate).round(4);
+        
+        # 매입금액(USD)
+        out["purchase_usd"] = (out["avg_usd"] * out["qty"]).round(2);
+        
+        # 매입금액(KRW) - 사용자 요청 (Trade 기록 합산 개념)
+        out["purchase_krw"] = (out["avg"] * out["qty"]).round(0);
+        
+        # 평가금액(USD)
+        out["eval_usd"] = (out["current_usd"] * out["qty"]).round(2);
+        
+        # 미실현손익(USD)
+        out["pl_usd"] = (out["eval_usd"] - out["purchase_usd"]).round(2);
+        
+        # 평단차이(USD) - diff_avg가 존재하는 경우에만
+        if "diff_avg" in out.columns:
+            out["diff_avg_usd"] = (out["diff_avg"] / usdkrw_rate).round(4);
+
     if eval_preserved is not None:
         out["eval"] = eval_preserved;
-    out["pl"] = ((pd.to_numeric(out["current"], errors="coerce").fillna(0.0) - pd.to_numeric(out["avg"], errors="coerce").fillna(0.0)) * pd.to_numeric(out["qty"], errors="coerce").fillna(0)).round(0);
+    
+    # 미실현손익(KRW)
+    out["pl"] = (out["eval"] - (out["avg"] * out["qty"])).round(0);
     def _rate(row):
         avg = float(row["avg"]) if row["avg"] else 0.0;
         cur = float(row["current"]) if row["current"] else 0.0;
@@ -1374,15 +1446,16 @@ def compute_metrics(df: pd.DataFrame, preserve_eval: bool = False) -> pd.DataFra
 
 
 
-def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug_fdr_like: str | None = None, manual_overrides: dict = None) -> pd.DataFrame:
+def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug_fdr_like: str | None = None, manual_overrides: dict = None) -> tuple[pd.DataFrame, float]:
+    usdkrw_rate = 1450.0  # 기본값
     try:
         import FinanceDataReader as fdr;  # type: ignore
     except Exception:
-        return df;
+        return df, usdkrw_rate;
     out = df.copy();
     try:
         # 로컬 캐시에서 이름 -> 코드 매핑 로드
-        name_to_code = _load_code_cache();
+        name_to_code = _load_us_stock_master();
         
         # FDR KRX 상장사 목록으로 캐시 보강 (가능하면)
         try:
@@ -1404,7 +1477,8 @@ def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug
                             name_to_code[n] = c;
                             updated_cache = True;
                     if updated_cache:
-                        _save_code_cache(name_to_code);
+                        # [FIX] 정의되지 않은 _save_code_cache를 _save_us_stock_master로 대체/정의
+                        _save_us_stock_master(name_to_code);
         except Exception as e:
             # StockListing 실패는 빈번하므로 사용자에게 안심할 수 있는 메시지 제공
             print(f"[FDR 안내] KRX 상장사 목록 업데이트 실패 (종목 가격 조회에는 영향 없음): {str(e).splitlines()[0]}");
@@ -1417,25 +1491,61 @@ def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug
             except Exception:
                 like_pat = None
         # 진행현황 표시용
+        
+        # 미국 주식용 환율 조회
+        usdkrw_rate = 1450.0
+        try:
+            df_usd = fdr.DataReader("USD/KRW", start=target_date) if target_date else fdr.DataReader("USD/KRW")
+            if df_usd is not None and not df_usd.empty:
+                usdkrw_rate = float(df_usd['Close'].iloc[-1])
+                print(f"\n💵 적용 환율(USD/KRW): {usdkrw_rate:,.2f}원")
+        except Exception as e:
+            print(f"\n경고: 환율 조회 실패 ({e}). 기본값 {usdkrw_rate}원 적용.")
+
         total_items = len(out);
+
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            class tqdm:
+                def __init__(self, iterable, **kwargs): self.iterable = iterable
+                def __iter__(self): return iter(self.iterable)
+                def write(self, s): print(s)
+                def close(self): pass
+
         print(f"\n📊 종목 가격 조회 시작 (총 {total_items}개)");
         
-        for i in range(len(out)):
-            # 진행현황 출력 (10% 단위 또는 마지막)
-            progress = i + 1;
-            pct = int(progress / total_items * 100) if total_items > 0 else 100;
-            if progress == 1 or progress == total_items or (pct % 10 == 0 and int((i) / total_items * 100) % 10 != 0):
-                print(f"\r   진행: ({progress}/{total_items}) {pct}%", end="", flush=True);
+        pbar = tqdm(range(len(out)), desc="조회 중", unit="종목")
+        for i in pbar:
             
             # 현재값이 있더라도 서버 가격으로 재갱신 (정책 전환)
             code = str(out.loc[i, "code"]).strip() if "code" in out.columns and pd.notna(out.loc[i, "code"]) else "";
             name = str(out.loc[i, "name"]).strip();
-            sym = code if code else name_to_code.get(name, "");
-            # 캐시에 없으면 네이버에서 검색하여 캐시에 추가
-            if not sym and name:
-                sym = _get_code_for_name(name, name_to_code);
+            
+            # 티커/종목명 구분 강화
+            sym = code;
             if not sym:
-                continue;
+                # 종목명이 티커 형태(대문자 알파벳 1~5자)인지 확인
+                import re as _re;
+                if _re.match(r'^[A-Z]{1,5}$', name):
+                    sym = name;
+                else:
+                    sym = name_to_code.get(name, "");
+            
+            if not sym:
+                # [NEW] 티커가 없으면 사용자에게 직접 물어보기
+                user_sym = input(f"\n[?] '{name}': 티커(종목코드)를 찾을 수 없습니다.\n   >> '{name}'의 티커를 입력해 주세요 (예: TSLA / Enter 시 스킵): ").strip().upper();
+                if user_sym:
+                    sym = user_sym;
+                    name_to_code[name] = sym;
+                    _save_us_stock_master({name: sym});
+                    out.loc[i, "code"] = sym;
+                else:
+                    pbar.write(f"[SKIP] '{name}': 종목코드가 없어 가격 조회를 건너뜁니다.");
+                    continue;
+            
+            # [INFO] 어떤 종목을 처리 중인지 아주 작게라도 표시하고 싶다면 아래 주석 해제 (단, 너무 많으면 터미널 지저분함)
+            # print(f" {sym}", end="", flush=True);
             try:
                 # 52주 데이터 수집을 위해 1년치 데이터 조회 (기본값)
                 # target_date가 지정된 경우에도 해당일 기준 1년 전부터 조회
@@ -1460,12 +1570,10 @@ def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug
                         # end_date 기준 최근 7일간 데이터 조회 시도
                         retry_start = (end_dt - timedelta(days=7)).strftime("%Y-%m-%d");
                         df_px = fdr.DataReader(sym, retry_start, end_date);
-                        if df_px is not None and not df_px.empty:
-                            print(f"[FDR] {name}({sym}) 재시도 성공: {len(df_px)}행");
+                        pbar.write(f" [FDR] {name}({sym}) 재시도 성공");
                     except Exception as e:
-                        # [개선] 실패 원인 상세 로깅
-                        err_msg = str(e).split('\n')[0] # 첫 줄만 추출
-                        print(f"[FDR 경고] {name}({sym}) 데이터 조회 실패 ({type(e).__name__}): {err_msg}");
+                        err_msg = str(e).split('\n')[0]
+                        pbar.write(f" [FDR 경고] {name}({sym}) 조회 실패: {err_msg}");
                         df_px = None;
                 
                 # Manual Overrides & K-OTC fallback
@@ -1492,32 +1600,21 @@ def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug
                      df_px = pd.DataFrame({
                          "Close": [kotc_price], "Open": [kotc_price], "High": [kotc_price], "Low": [kotc_price], "Volume": [0]
                      }, index=[pd.Timestamp.now()]);
-                     print(f"[Override] {name}({sym}) 수동 지정 가격 사용: {kotc_price:,.0f}원");
+                     pbar.write(f" [Override] {name}({sym}) 수동 지정 가격 사용: {kotc_price:,.0f}원");
 
                 # 2. Check Static KOTC_MANUAL_PRICES or Fallback to Naver Crawling (for all failing items)
                 elif (df_px is None or df_px.empty):
-                    # FDR 실패 경고 로그
-                    print(f"\n⚠️  [FDR 실패] {name}({sym}) FDR 데이터 조회 실패 - 네이버 크롤링으로 폴백");
-                    
-                    # 과거 날짜인 경우 네이버 크롤링 제한 경고
+                    print(f"{p_prefix} ⚠️  [FDR 실패] {name}({sym}) FDR 데이터 조회 실패 - 네이버 크롤링으로 폴백");
                     if is_past_date:
-                        print(f"   ⚠️  주의: 과거 날짜({end_date}) 지정됨 - 네이버는 '현재가'만 제공하므로 정확하지 않을 수 있습니다.");
-                    
-                    # 네이버 크롤링 시도
-                    fallback_price = get_kotc_price(sym, name);
+                        print(f"{p_prefix}    ⚠️  주의: 과거 날짜({end_date}) 지정됨 - 네이버는 '현재가'만 제공하므로 정확하지 않을 수 있습니다.");
+                    fallback_price = None;
                     if fallback_price:
-                        # 가짜 DataFrame 생성하여 로직 흐름 유지
-                        df_px = pd.DataFrame({
-                            "Close": [fallback_price], "Open": [fallback_price], "High": [fallback_price], "Low": [fallback_price], "Volume": [0]
-                        }, index=[pd.Timestamp.now()]);
-                        
-                        print(f"   ✅ [Fallback/Naver] {name}({sym}) 네이버 현재가 사용: {fallback_price:,.0f}원");
+                        pass
                     else:
-                        # 최종 실패 시 캐시된 전일 가격 유지 유도 (또는 0방지)
                         if "current" in out.columns and pd.notna(out.loc[i, "current"]) and out.loc[i, "current"] != 0:
-                            print(f"   ❌ [FDR/Naver 최종 실패] {name}({sym}) 기존 가격 유지: {out.loc[i, 'current']:,.0f}원");
+                            print(f"{p_prefix}    ❌ [FDR/Naver 최종 실패] {name}({sym}) 기존 가격 유지: {out.loc[i, 'current']:,.0f}원");
                         else:
-                            print(f"   ❌ [FDR/Naver 최종 실패] {name}({sym}) 현재가 업데이트 불가");
+                            print(f"{p_prefix}    ❌ [FDR/Naver 최종 실패] {name}({sym}) 현재가 업데이트 불가");
 
                 if df_px is not None and not df_px.empty and "Close" in df_px.columns:
                     # target_date가 지정된 경우 해당 날짜의 종가 찾기
@@ -1534,11 +1631,17 @@ def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug
                             # target_date 데이터가 없으면 가장 최근 거래일 데이터 사용
                             last_row = df_px.iloc[-1];
                             actual_date = df_px.index[-1].strftime("%Y-%m-%d") if hasattr(df_px.index[-1], 'strftime') else str(df_px.index[-1]);
-                            print(f"[FDR] {name}({sym}) 지정일({target_date_str}) 데이터 없음 → 최근 거래일({actual_date}) 종가 사용");
+                            pbar.write(f" [FDR] {name}({sym}) 지정일({target_date_str}) 데이터 없음 → 최근 거래일({actual_date}) 종가 사용");
                     else:
                         last_row = df_px.iloc[-1];
                     
                     price_from_df = float(last_row["Close"]);
+                    # USD 원본 가격 보존
+                    out.loc[i, "current_usd"] = price_from_df;
+                    
+                    # 미국 주식 종가(USD)에 환율을 곱해 원화로 변환
+                    price_from_df = price_from_df * usdkrw_rate;
+                    price_from_df = round(price_from_df, 0);  # 원화는 소수점 제거
                     
                     # FDR 성공 시 FDR 가격 사용 (크로스체크 제거로 성능 개선)
                     # - Override 사용 시: Override 가격 사용
@@ -1553,6 +1656,9 @@ def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug
                         print(f"[FDRDBG] name={name} code={code} sym={sym} close={_last}")
                     
                     out.loc[i, "current"] = current_price;
+                    # 개별 종목마다 성공 로그를 찍으면 지저분하므로, FDR 경고가 있을 때만 위에 표시하게 함.
+                    # 대신 tqdm postfix를 업데이트하여 현재 처리 중인 종목을 보여줌.
+                    pbar.set_postfix(종목=f"{name}({sym})")
                     
                     # 일일 등락률 (Change 컬럼 활용)
                     if "Change" in df_px.columns:
@@ -1618,13 +1724,14 @@ def try_update_current_with_fdr(df: pd.DataFrame, target_date: str = None, debug
             except Exception as e:
                 print(f"[Error in loop] {name}({sym}): {e}");
                 continue;
+        pbar.close()
         # 진행현황 완료
         print(f"\n✅ 종목 가격 조회 완료 ({total_items}개)");
         # 메트릭 재계산
-        out = compute_metrics(out);
-        return out;
+        out = compute_metrics(out, usdkrw_rate=usdkrw_rate);
+        return out, usdkrw_rate;
     except Exception:
-        return df;
+        return df, usdkrw_rate;
 
 
 
@@ -1645,12 +1752,15 @@ def _normalize_key_name(s: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="구글 시트 기반 주식 잔고 및 매매내역 업데이트 시스템");
-    today_default = datetime.now().strftime("%Y%m%d");
-    parser.add_argument("--date", default=today_default, help=f"생성할 잔고 날짜 (YYYYMMDD 형식, 기본값: 오늘({today_default}))");
+    # US 시장 특성을 고려하여 기본값을 직전 영업일로 설정
+    # (한국 시간 수요일 밤이면 미국 화요일 장마감 데이터를 가져오도록)
+    today_default_obj = get_previous_business_day(datetime.now())
+    today_default = today_default_obj.strftime("%Y%m%d")
+    parser.add_argument("--date", default=today_default, help=f"생성할 잔고 날짜 (YYYYMMDD 형식, 기본값: 직전 영업일({today_default}))");
+    parser.add_argument("--gs-holdings-key", required=True, help="잔고 스프레드시트 키 (입력/출력 공통)");
     parser.add_argument("--gs-trades-key", required=True, help="매매일지 스프레드시트 키");
     parser.add_argument("--gs-trades-gid", type=int, default=None, help="매매일지 탭 gid (미지정 시 첫 번째 탭)");
     parser.add_argument("--gs-trades-title", default=None, help="매매일지 탭 제목");
-    parser.add_argument("--gs-holdings-key", required=True, help="잔고 스프레드시트 키 (입력/출력 공통)");
     parser.add_argument("--gs-holdings-tab", default=None, help="기준(전일) 잔고 탭 제목");
     parser.add_argument("--gs-out-tab", default=None, help="생성할 잔고 탭 제목 (기본값: 잔고_YYYYMMDD)");
     parser.add_argument("--gs-cred", default=None, help="인증키 파일 경로 (기본값: config/내의 json)");
@@ -1659,6 +1769,7 @@ def main():
     parser.add_argument("--override-price", action="append", default=None, help="수동 현재가 오버라이드 (종목명=가격)");
     parser.add_argument("--override-json", default=None, help="수동 현재가 오버라이드 JSON");
     parser.add_argument("--no-fdr-update", action="store_true", help="FDR 가격 업데이트 건너뛰기");
+    parser.add_argument("--allow-empty-prev", action="store_true", help="전일 데이터가 없어도 무시하고 빈 잔고에서 시작");
     parser.add_argument("--dry-run", action="store_true", help="시트 쓰기 생략 및 콘솔 출력");
     parser.add_argument("--debug-one-name", default=None, help="특정 종목 한 줄만 계산 결과 출력");
     parser.add_argument("--debug-like", action="append", default=None, help="이름 부분일치 종목들 출력");
@@ -1674,7 +1785,14 @@ def main():
     parser.add_argument("--tr-qty", default=None);
     parser.add_argument("--tr-price", default=None);
     parser.add_argument("--tr-sign", default=None);
+    
     args = parser.parse_args();
+    run_daily_update(args)
+
+def run_daily_update(args):
+    """
+    단일 일자 주식 잔고 업데이트 핵심 로직
+    """
 
     wd = os.getcwd();
     base_dir = wd;
@@ -1757,7 +1875,9 @@ def main():
                 "code": ["종목코드", "code", "symbol", "코드"],
                 "qty": ["잔고수량", "수량", "qty", "잔고"],
                 "avg": ["평균단가", "단가", "avg", "매입단가"],
+                "avg_usd": ["평균단가(USD)", "평균단가_USD", "avg_usd", "avgusd", "Average(USD)"],
                 "current": ["현재가", "current", "가격"],
+                "current_usd": ["현재가(USD)", "현재가_USD", "현재가usd", "currentusd", "Current(USD)"],
                 "eval": ["평가금액", "평가금", "eval"],
                 "type": ["구분", "자산구분", "type"],
             };
@@ -1777,16 +1897,36 @@ def main():
             holdings = pd.DataFrame();
             holdings["name"] = df_norm[col_map["name"]].astype(str).str.strip();
             holdings["code"] = df_norm[col_map["code"]].astype(str).str.strip() if "code" in col_map else "";
+            
+            # [NEW] 종목코드 보완 (한글명 -> 티커 매칭)
+            name_to_code_m = _load_us_stock_master();
+            for i_h in range(len(holdings)):
+                if not holdings.loc[i_h, "code"] or holdings.loc[i_h, "code"] == "nan":
+                    n_h = str(holdings.loc[i_h, "name"]);
+                    if n_h in name_to_code_m:
+                        holdings.loc[i_h, "code"] = name_to_code_m[n_h];
+                    else:
+                        import re as _re_h;
+                        if _re_h.match(r'^[A-Z]{1,5}$', n_h):
+                            holdings.loc[i_h, "code"] = n_h;
+
             holdings["type"] = df_norm[col_map["type"]].astype(str).str.strip() if "type" in col_map else "";
             holdings["qty"] = pd.to_numeric(df_norm[col_map["qty"]].astype(str).str.replace(",",""), errors="coerce").fillna(0).astype(int);
-            holdings["avg"] = pd.to_numeric(df_norm[col_map["avg"]].astype(str).str.replace(",",""), errors="coerce").fillna(0.0);
+            if "avg" in col_map:
+                holdings["avg"] = pd.to_numeric(df_norm[col_map["avg"]].astype(str).str.replace(",",""), errors="coerce").fillna(0.0);
+            if "avg_usd" in col_map:
+                holdings["avg_usd"] = pd.to_numeric(df_norm[col_map["avg_usd"]].astype(str).str.replace(",",""), errors="coerce").fillna(0.0);
             
             if "current" in col_map:
                 holdings["current"] = pd.to_numeric(df_norm[col_map["current"]].astype(str).str.replace(",",""), errors="coerce").fillna(0.0);
+            if "current_usd" in col_map:
+                holdings["current_usd"] = pd.to_numeric(df_norm[col_map["current_usd"]].astype(str).str.replace(",",""), errors="coerce").fillna(0.0);
             if "eval" in col_map:
                 holdings["eval"] = pd.to_numeric(df_norm[col_map["eval"]].astype(str).str.replace(",",""), errors="coerce").fillna(0.0);
 
             print(f"[정보] 전일 잔고 파싱 완료: {len(holdings)}개 종목");
+            # 파생 컬럼 계산 (임시 환율 1450 적용하여 데이터 정합성 확보)
+            holdings = compute_metrics(holdings, usdkrw_rate=1450.0);
             # 전일 값 강제 보정: 평균단가/수량을 정확 헤더 매핑으로 덮어쓰기 - 강화 버전
             try:
                 base_map_gs = _build_base_map_gs_exact(args.gs_holdings_key, target_previous_tab, args.gs_cred, ["잔고수량","평균단가"]);
@@ -1826,14 +1966,50 @@ def main():
             raise ValueError("구글 시트 키가 지정되지 않았습니다.");
     except Exception as e:
         print(f"경고: 전일 잔고 데이터 로딩 실패: {e}");
-        print(f"전일 데이터를 사용할 수 없으므로 모든 수량차이를 0으로 설정합니다.");
+        
+        # 전일 데이터를 명시적으로 찾지 못한 경우(탭 목록은 있으나 해당 날짜가 없음)
+        # 모든 수량차이를 0으로 설정하기보다 프로세스를 중단하는 것이 안전할 수 있음
+        # 만약 시트에 '잔고_'로 시작하는 다른 탭이 하나도 없다면 첫 실행으로 간주
+        is_first_execution = True
+        try:
+            if args.gs_holdings_key:
+                import gspread
+                from google.oauth2.service_account import Credentials
+                scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+                cred_path = args.gs_cred or os.path.join(os.getcwd(), "stock-holding-log-db46e6d87dd6.json")
+                creds = Credentials.from_service_account_file(cred_path, scopes=scopes)
+                gc = gspread.authorize(creds)
+                sh = gc.open_by_key(args.gs_holdings_key)
+                all_tabs = [w.title for w in sh.worksheets()]
+                if any(t.startswith("잔고_") for t in all_tabs):
+                    is_first_execution = False
+        except:
+            pass
+            
+        if not is_first_execution and not getattr(args, "allow_empty_prev", False):
+            print(f"[오류] 스프레드시트에 기존 잔고 탭이 존재하지만 최근 데이터를 찾지 못했습니다.");
+            print(f"데이터 소실을 방지하기 위해 중단합니다. 탭 이름을 확인하거나 --gs-holdings-tab으로 직접 지정하세요.");
+            print(f"만약 빈 잔고에서 새로 시작하고 싶다면 --allow-empty-prev 옵션을 사용하세요.");
+            sys.exit(1)
+            
+        print(f"전일 데이터를 사용할 수 없으므로(첫 실행 추정) 모든 수량차이를 0으로 설정합니다.");
         # 전일 데이터가 없을 때는 빈 DataFrame으로 초기화
         holdings = pd.DataFrame(columns=["code", "name", "qty", "avg", "current", "eval", "pl", "rate", "weight"]);
     
-    # load_trades용 날짜 형식 ("2025. 10. 29")
+    # 2. 매매 기록 로드 전 환율 먼저 조회 (USD 환산용)
+    usdkrw_rate = 1450.0;
+    try:
+        import FinanceDataReader as fdr;
+        target_date_fdr_init = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:8]}";
+        df_usd = fdr.DataReader("USD/KRW", start=target_date_fdr_init) if target_date_fdr_init else fdr.DataReader("USD/KRW")
+        if df_usd is not None and not df_usd.empty:
+            usdkrw_rate = float(df_usd['Close'].iloc[-1])
+            print(f"\n💵 적용 환율(USD/KRW): {usdkrw_rate:,.2f}원")
+    except Exception as e:
+        print(f"\n경고: 환율 조회 실패 ({e}). 기본값 {usdkrw_rate}원 적용.")
+
+    # 3. 매매 기록 로드
     target_date_for_load = f"{target_date[:4]}. {target_date[4:6]}. {target_date[6:8]}";
-    
-    # 매매 기록 로드
     try:
         trades = load_trades(
             gsheet_key=args.gs_trades_key,
@@ -1852,20 +2028,19 @@ def main():
             }
         );
     except Exception as e:
-        print(f"에러: {e}");
-        if args.gs_trades_key:
-            print(f"구글 시트 읽기 실패: key={args.gs_trades_key}, gid={args.gs_trades_gid}");
-        sys.exit(1);
+        print(f"매매일지 로드 중 오류: {e}");
+        trades = pd.DataFrame();
 
-    # baseline(전일) 메트릭 계산용 사본
+    # 4. baseline(전일) 메트릭 계산용 사본 (수량차이 등 계산용)
     base_for_diff = holdings.copy();
     # baseline 현재가 비어 있으면 평균단가로 보정
     if "current" not in base_for_diff.columns:
         base_for_diff["current"] = base_for_diff["avg"];
     base_for_diff.loc[base_for_diff["current"].isna() | (base_for_diff["current"] == 0), "current"] = base_for_diff.loc[base_for_diff["current"].isna() | (base_for_diff["current"] == 0), "avg"];
+    
     # 같은 종목이 여러 행에 있을 수 있으므로 그룹화
     key_cols_base = [c for c in ["code", "name", "type"] if c in base_for_diff.columns];
-    if len(key_cols_base) > 0:
+    if len(key_cols_base) > 0 and len(base_for_diff) > 0:
         def weighted_avg_base(group):
             qty = group["qty"].sum();
             if qty > 0:
@@ -1877,6 +2052,8 @@ def main():
                 "avail": group["avail"].sum() if "avail" in group else qty,
                 "avg": avg,
                 "current": group["current"].mean(),
+                # avg_usd가 있으면 보존
+                "avg_usd": group["avg_usd"].mean() if "avg_usd" in group else (avg / usdkrw_rate),
                 "eval": group["eval"].sum() if "eval" in group else 0.0,
                 "pl": group["pl"].sum() if "pl" in group else 0.0,
                 "rate": group["rate"].mean() if "rate" in group else 0.0,
@@ -1884,13 +2061,12 @@ def main():
             });
         grouped = base_for_diff.groupby(key_cols_base, dropna=False);
         base_for_diff = grouped.apply(weighted_avg_base);
-        if isinstance(base_for_diff.index, pd.MultiIndex):
-            base_for_diff = base_for_diff.reset_index();
-        else:
-            base_for_diff = base_for_diff.reset_index(drop=True);
-    base_for_diff = compute_metrics(base_for_diff, preserve_eval=True);
+        base_for_diff = base_for_diff.reset_index() if isinstance(base_for_diff.index, pd.MultiIndex) else base_for_diff.reset_index(drop=True);
+    
+    base_for_diff = compute_metrics(base_for_diff, usdkrw_rate=usdkrw_rate, preserve_eval=True);
 
-    updated = apply_trades_to_holdings(holdings, trades);
+    # 5. 매매 기록 적용 (이미 조회된 환율 사용)
+    updated = apply_trades_to_holdings(holdings, trades, usdkrw_rate=usdkrw_rate);
     
     # 전종목 현재가 갱신용 날짜 (FDR API용 "2025-10-29" 형식)
     target_date_fdr = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:8]}";
@@ -1955,16 +2131,21 @@ def main():
         except Exception:
             pass
 
-    # FDR 업데이트 호출 (오버라이드 전달)
+    # 6. 전종목 현재가 갱신 (항상 API로 업데이트)
     if not getattr(args, "no_fdr_update", False):
-        updated = try_update_current_with_fdr(updated, target_date_fdr, debug_fdr_like=fdr_like, manual_overrides=overrides);
+        # FDR 업데이트 호출 (이미 조회된 usdkrw_rate 활용하되, 리턴받은 최신 환율로 갱신)
+        updated, latest_rate = try_update_current_with_fdr(updated, target_date_fdr, debug_fdr_like=fdr_like, manual_overrides=overrides);
+        if latest_rate and latest_rate > 0:
+            usdkrw_rate = latest_rate;
+    else:
+        print("[정보] --no-fdr-update 옵션으로 FDR 가격 업데이트를 건너뜁니다.");
     
     # K-OTC 현재가 매핑이 있으면 덮어쓰기 (예: 메가젠임플란트)
     kotc_map = _read_kotc_map(args.gs_kotc_key, args.gs_kotc_tab, args.gs_cred);
     if kotc_map:
         updated = _apply_kotc_prices(updated, kotc_map);
         # 현재가가 갱신되었으므로 평가금액 등의 메트릭 재계산
-        updated = compute_metrics(updated);
+        updated = compute_metrics(updated, usdkrw_rate=usdkrw_rate);
     
     # _parse_overrides 함수 및 overrides 변수는 위로 이동됨
     # override_demo Logic Removed (K-OTC automated)
@@ -2096,9 +2277,9 @@ def main():
                     print("[DBG] applied override names:", applied_override_names);
             except Exception:
                 applied_override_names = set();
-            updated = compute_metrics(updated);
+            updated = compute_metrics(updated, usdkrw_rate=usdkrw_rate);
     # 현재가가 갱신되었으므로 평가금액 등의 메트릭 재계산
-    updated = compute_metrics(updated);
+    updated = compute_metrics(updated, usdkrw_rate=usdkrw_rate);
     
     # 오버라이드 검증: 모든 오버라이드 종목이 제대로 적용되었는지 확인
     override_validation_passed = True;
@@ -2159,44 +2340,21 @@ def main():
     code_to_sector, name_to_sector = _read_sector_mapping();
     updated = _apply_sector_info(updated, code_to_sector, name_to_sector);
     
-    # 전일 대비 차이 계산
-    key_cols = [c for c in ["code", "name", "type"] if c in updated.columns];
-    # merge 전에 양쪽 모두 같은 키로 그룹화하여 중복 제거
-    def group_for_merge(df, keys, eval_col="eval"):
-        if len(df) == 0:
-            return df;
-        grouped = df.groupby(keys, dropna=False);
-        def agg_func(group):
-            result = {};
-            for col in group.columns:
-                if col == eval_col or col in ["qty", "avail", "pl"]:
-                    result[col] = group[col].sum();
-                elif col == "avg":
-                    qty_sum = group["qty"].sum();
-                    if qty_sum > 0:
-                        result[col] = (group["avg"] * group["qty"]).sum() / qty_sum;
-                    else:
-                        result[col] = group[col].mean();
-                elif col in ["current", "rate", "weight"]:
-                    result[col] = group[col].mean();
-                elif col == "_updated":
-                    result[col] = group[col].any() if col in group.columns else False;
-                elif col not in keys:
-                    result[col] = group[col].iloc[0];
-            return pd.Series(result);
-        result = grouped.apply(agg_func);
-        if isinstance(result.index, pd.MultiIndex):
-            result = result.reset_index();
-        else:
-            result = result.reset_index(drop=True);
-        return result;
+    # 전일 대비 차이 계산을 위해 key_cols 설정 (code 기반 병합)
+    key_cols = ["code"];
     
-    # 원본 행 보존을 위해 그룹화 생략 (종목 수 유지)
-    # 메트릭 재계산만 수행
-    updated = compute_metrics(updated);
-    base_for_diff = compute_metrics(base_for_diff, preserve_eval=True);
-    
+    # 병합 전 정합성 확인: code가 중복되는 경우 합침
+    updated = updated.groupby("code").agg({
+        "name": "first", "type": "first", "qty": "sum", "avail": "sum", "avg": "mean", "current": "mean"
+    }).reset_index();
+    updated = compute_metrics(updated, usdkrw_rate=usdkrw_rate);
+
     base_small = base_for_diff[key_cols + ["qty", "avg", "eval", "weight"]].copy();
+    if base_small["code"].duplicated().any():
+        base_small = base_small.groupby("code").agg({
+            "qty": "sum", "avg": "mean", "eval": "sum", "weight": "mean"
+        }).reset_index();
+
     base_small = base_small.rename(columns={"qty": "_b_qty", "avg": "_b_avg", "eval": "_b_eval", "weight": "_b_weight"});
     merged = pd.merge(updated, base_small, on=key_cols, how="left");
 
@@ -2270,12 +2428,13 @@ def main():
 
     merged["diff_qty"] = merged["qty"] - merged["_b_qty"].fillna(0);
     merged["diff_avg"] = merged["avg"] - merged["_b_avg"].fillna(0.0);
-    # 전일대비_평가금액: 금일 평가금액 - 전일 평가금액 (차액)
-    # [비활성화] 금액차이 계산 - 더 이상 필요하지 않아 0으로 설정 (호환성을 위해 컬럼은 유지)
-    merged["diff_eval"] = 0.0;  # merged["eval"] - merged["_b_eval"].fillna(0.0);
-    # 전일대비_보유비중: 금일 보유비중 - 전일 보유비중 (차액)
-    # [비활성화] 비중차이 계산 - 더 이상 필요하지 않아 0으로 설정 (호환성을 위해 컬럼은 유지)
-    merged["diff_weight"] = 0.0;  # merged["weight"] - merged["_b_weight"].fillna(0.0);
+    # USD 차액 계산 추가 (평단차이)
+    if "diff_avg_usd" in merged.columns:
+        pass; # compute_metrics 에서 이미 계산됨
+    
+    # [제거] 금액차이/비중차이 필드 초기화 (호환성 유지)
+    merged["diff_eval"] = 0.0;
+    merged["diff_weight"] = 0.0;
     
     # 오버라이드가 적용된 종목의 current 가격이 손실되지 않았는지 확인 및 복구
     if overrides:
@@ -2289,7 +2448,7 @@ def main():
                         print(f"[복구] merged 후 메가젠임플란트 가격 복구: {current_price} -> {override_price}");
                         merged.loc[megagen_mask, "current"] = float(override_price);
                         # 메트릭 재계산
-                        merged = compute_metrics(merged);
+                        merged = compute_metrics(merged, usdkrw_rate=usdkrw_rate);
     
     updated = merged;
 
@@ -2305,7 +2464,7 @@ def main():
         if out_rows:
             dbg = pd.concat(out_rows, ignore_index=True).drop_duplicates();
             if not dbg.empty:
-                cols = [c for c in ["code","name","qty","avg","current","eval","pl","rate","weight","diff_qty","diff_avg","diff_eval","diff_weight"] if c in dbg.columns];
+                cols = [c for c in ["code","name","qty","avg","current","current_usd","eval","eval_usd","pl","rate","weight","diff_qty","diff_avg","diff_eval","diff_weight"] if c in dbg.columns];
                 dbg2 = dbg[cols].copy();
                 if "rate" in dbg2.columns:
                     dbg2.loc[:, "rate"] = pd.to_numeric(dbg2["rate"], errors="coerce").fillna(0.0);
@@ -2340,7 +2499,7 @@ def main():
             print(f"완료: 구글 시트 {gs_out_tab} 탭 생성");
     else:
         # 로컬 파일에 저장
-        out_path = save_holdings(updated, base_filename="미국.xlsx", target_sheet=target_sheet);
+        out_path = save_holdings(updated, base_filename="미국_잔고.xlsx", target_sheet=target_sheet);
         print(f"완료: {out_path} 생성");
     print(f"보유 종목 수: {len(updated)}");
     total_qty = int(updated["qty"].sum()) if not updated.empty else 0;
@@ -2350,12 +2509,6 @@ def main():
 if __name__ == "__main__":
     pd.set_option("display.width", 180);
     pd.set_option("display.max_columns", 20);
-    try:
-        main();
-    except Exception as e:
-        import traceback as _tb;
-        print(f"에러: {e}");
-        _tb.print_exc();
-        sys.exit(1);
+    main();
 
 
